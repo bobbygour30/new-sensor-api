@@ -1,57 +1,15 @@
 {
   "version": 2,
-  "functions": {
-    "server.js": {
-      "memory": 1024,
-      "maxDuration": 10
+  "builds": [
+    {
+      "src": "server.js",
+      "use": "@vercel/node"
     }
-  },
+  ],
   "routes": [
-    {
-      "src": "/health",
-      "dest": "/server.js"
-    },
-    {
-      "src": "/api/device",
-      "dest": "/server.js"
-    },
-    {
-      "src": "/api/device/latest",
-      "dest": "/server.js"
-    },
-    {
-      "src": "/api/device/stats",
-      "dest": "/server.js"
-    },
     {
       "src": "/(.*)",
       "dest": "/server.js"
-    }
-  ],
-  "env": {
-    "MONGODB_URI": "@mongodb_uri"
-  },
-  "headers": [
-    {
-      "source": "/(.*)",
-      "headers": [
-        {
-          "key": "Access-Control-Allow-Origin",
-          "value": "*"
-        },
-        {
-          "key": "Access-Control-Allow-Methods",
-          "value": "GET, POST, PUT, DELETE, PATCH, OPTIONS"
-        },
-        {
-          "key": "Access-Control-Allow-Headers",
-          "value": "Content-Type, Authorization, X-Requested-With"
-        },
-        {
-          "key": "Access-Control-Allow-Credentials",
-          "value": "true"
-        }
-      ]
     }
   ]
 }
