@@ -4,54 +4,80 @@ import Device from '../models/Device.js';
 
 const router = express.Router();
 
-// Helper function to check if device exists (single device enforcement)
-async function checkIfDeviceExists() {
-  await connectDB();
-  const count = await Device.countDocuments();
-  return count > 0;
-}
-
-// GET - Get the single device data (no device_id needed)
+// GET - Get sensor readings with filtering
 router.get('/', async (req, res) => {
   try {
     await connectDB();
     
-    // Get the single device (first and only one)
-    const device = await Device.findOne().sort({ created_at: -1 });
+    const { 
+      device_id, 
+      limit = 50,        // Default to 50 entries
+      hours,             // Get readings from last X hours
+      from,              // Specific from date
+      to                 // Specific to date
+    } = req.query;
     
-    if (!device) {
-      return res.status(404).json({
-        success: false,
-        error: "No device found. Please create one device first."
-      });
+    const limitNum = parseInt(limit);
+    
+    // Build query
+    const query = {};
+    
+    // Add device_id filter if provided
+    if (device_id) {
+      query.device_id = device_id;
     }
     
-    const { limit = 50, page = 1 } = req.query;
-    const limitNum = parseInt(limit);
-    const skip = (parseInt(page) - 1) * limitNum;
+    // Add time filter if hours parameter is provided
+    if (hours) {
+      const hoursAgo = new Date();
+      hoursAgo.setHours(hoursAgo.getHours() - parseInt(hours));
+      query.created_at = { $gte: hoursAgo };
+    }
     
-    // Get all readings of the single device with pagination
-    const data = await Device.find({ device_id: device.device_id })
+    // Add specific date range if provided
+    if (from || to) {
+      query.created_at = {};
+      if (from) {
+        query.created_at.$gte = new Date(from);
+      }
+      if (to) {
+        query.created_at.$lte = new Date(to);
+      }
+    }
+    
+    // Get data with sorting (newest first) and limit
+    const data = await Device.find(query)
       .sort({ created_at: -1 })
-      .skip(skip)
       .limit(limitNum);
     
-    const total = await Device.countDocuments({ device_id: device.device_id });
+    // Get total count for pagination info
+    const totalCount = await Device.countDocuments(query);
+    
+    // Get unique device IDs for info
+    const deviceIds = await Device.distinct('device_id');
     
     res.status(200).json({
       success: true,
+      data: data,
       device_info: {
-        device_id: device.device_id,
-        total_readings: total
+        total_devices: deviceIds.length,
+        device_ids: deviceIds,
+        total_readings: totalCount
       },
-      data,
       pagination: {
-        page: parseInt(page),
         limit: limitNum,
-        total,
-        pages: Math.ceil(total / limitNum)
+        returned: data.length,
+        total: totalCount,
+        hasMore: totalCount > limitNum
+      },
+      filters: {
+        device_id: device_id || null,
+        hours: hours || null,
+        from: from || null,
+        to: to || null
       }
     });
+    
   } catch (err) {
     console.error("GET /api/device error:", err);
     res.status(500).json({ 
@@ -61,24 +87,29 @@ router.get('/', async (req, res) => {
   }
 });
 
-// GET - Get latest reading of the single device
+// GET - Get latest reading only
 router.get('/latest', async (req, res) => {
   try {
     await connectDB();
     
-    const device = await Device.findOne().sort({ created_at: -1 });
+    const { device_id } = req.query;
+    const query = device_id ? { device_id } : {};
     
-    if (!device) {
+    const latestReading = await Device.findOne(query)
+      .sort({ created_at: -1 });
+    
+    if (!latestReading) {
       return res.status(404).json({
         success: false,
-        error: "No device found. Please create a device first."
+        error: "No readings found"
       });
     }
     
     res.status(200).json({
       success: true,
-      data: device
+      data: latestReading
     });
+    
   } catch (err) {
     console.error("GET /api/device/latest error:", err);
     res.status(500).json({ 
@@ -88,7 +119,7 @@ router.get('/latest', async (req, res) => {
   }
 });
 
-// POST - Create the ONE AND ONLY device or update existing
+// POST - Create a new sensor reading (always adds new entry)
 router.post('/', async (req, res) => {
   try {
     await connectDB();
@@ -115,148 +146,31 @@ router.post('/', async (req, res) => {
       });
     }
 
-    // Check if a device already exists
-    const existingDevices = await Device.find();
-    
-    if (existingDevices.length === 0) {
-      // No device exists - CREATE the first and only device
-      const device = await Device.create({
-        device_id,
-        temperature,
-        relative_humidity,
-        tvoc,
-        air_velocity,
-        pm_2_5,
-        pm_10,
-        co2,
-        lux,
-        noise_av,
-        noise_peak,
-        status,
-        last_seen: new Date()
-      });
-      
-      return res.status(201).json({
-        success: true,
-        message: "✅ Device created successfully. This is the ONLY device allowed in the system.",
-        data: device
-      });
-    } 
-    
-    // Device already exists - UPDATE the existing device
-    // Check if trying to create a DIFFERENT device
-    if (existingDevices[0].device_id !== device_id) {
-      return res.status(403).json({
-        success: false,
-        error: "❌ Only ONE device is allowed in this system. A device already exists with ID: " + existingDevices[0].device_id,
-        existing_device_id: existingDevices[0].device_id
-      });
-    }
-    
-    // Update the existing device
-    const updatedDevice = await Device.findOneAndUpdate(
-      { device_id },
-      {
-        temperature,
-        relative_humidity,
-        tvoc,
-        air_velocity,
-        pm_2_5,
-        pm_10,
-        co2,
-        lux,
-        noise_av,
-        noise_peak,
-        status,
-        last_seen: new Date()
-      },
-      { new: true, runValidators: true }
-    );
-    
-    res.status(200).json({
+    // Create new reading (always add, don't update existing)
+    const newReading = await Device.create({
+      device_id,
+      temperature,
+      relative_humidity,
+      tvoc,
+      air_velocity,
+      pm_2_5,
+      pm_10,
+      co2,
+      lux,
+      noise_av,
+      noise_peak,
+      status: status || 'active',
+      last_seen: new Date()
+    });
+
+    res.status(201).json({
       success: true,
-      message: "✅ Device data updated successfully",
-      data: updatedDevice
+      message: "✅ Sensor reading added successfully",
+      data: newReading
     });
     
   } catch (err) {
     console.error("POST /api/device error:", err);
-    res.status(500).json({ 
-      success: false,
-      error: err.message || "Server error" 
-    });
-  }
-});
-
-// PUT - Update the single device
-router.put('/', async (req, res) => {
-  try {
-    await connectDB();
-    
-    const device = await Device.findOne();
-    
-    if (!device) {
-      return res.status(404).json({
-        success: false,
-        error: "No device found. Please create a device first using POST."
-      });
-    }
-    
-    const updateData = req.body;
-    delete updateData.device_id; // Prevent changing device_id
-    
-    const updatedDevice = await Device.findOneAndUpdate(
-      { device_id: device.device_id },
-      { ...updateData, last_seen: new Date() },
-      { new: true, runValidators: true }
-    );
-    
-    res.status(200).json({
-      success: true,
-      message: "✅ Device updated successfully",
-      data: updatedDevice
-    });
-    
-  } catch (err) {
-    console.error("PUT /api/device error:", err);
-    res.status(500).json({ 
-      success: false,
-      error: err.message || "Server error" 
-    });
-  }
-});
-
-// DELETE - Delete the only device (with confirmation)
-router.delete('/', async (req, res) => {
-  try {
-    await connectDB();
-    
-    const { confirm } = req.query;
-    
-    if (confirm !== 'yes') {
-      return res.status(400).json({
-        success: false,
-        error: "To delete the only device, please add ?confirm=yes to your request"
-      });
-    }
-    
-    const device = await Device.findOneAndDelete();
-    
-    if (!device) {
-      return res.status(404).json({
-        success: false,
-        error: "No device found to delete"
-      });
-    }
-    
-    res.status(200).json({
-      success: true,
-      message: "✅ Device deleted successfully. You can now create a new device.",
-      deleted_device: device
-    });
-    
-  } catch (err) {
-    console.error("DELETE /api/device error:", err);
     res.status(500).json({ 
       success: false,
       error: err.message || "Server error" 
@@ -269,47 +183,78 @@ router.get('/stats', async (req, res) => {
   try {
     await connectDB();
     
-    const device = await Device.findOne();
+    const { device_id, hours } = req.query;
     
-    if (!device) {
-      return res.status(404).json({
-        success: false,
-        error: "No device found"
-      });
+    // Build query for time range
+    const query = {};
+    if (device_id) query.device_id = device_id;
+    if (hours) {
+      const hoursAgo = new Date();
+      hoursAgo.setHours(hoursAgo.getHours() - parseInt(hours));
+      query.created_at = { $gte: hoursAgo };
     }
     
-    const totalReadings = await Device.countDocuments({ device_id: device.device_id });
-    
     const stats = await Device.aggregate([
-      { $match: { device_id: device.device_id } },
+      { $match: query },
       {
         $group: {
-          _id: null,
+          _id: "$device_id",
           avg_temperature: { $avg: "$temperature" },
           avg_humidity: { $avg: "$relative_humidity" },
           avg_co2: { $avg: "$co2" },
           avg_pm2_5: { $avg: "$pm_2_5" },
           max_temperature: { $max: "$temperature" },
           min_temperature: { $min: "$temperature" },
-          total_readings: { $sum: 1 }
+          total_readings: { $sum: 1 },
+          first_reading: { $min: "$created_at" },
+          last_reading: { $max: "$created_at" }
         }
       }
     ]);
     
     res.status(200).json({
       success: true,
-      device_info: {
-        device_id: device.device_id,
-        created_at: device.created_at,
-        last_seen: device.last_seen,
-        status: device.status
-      },
-      statistics: stats[0] || {},
-      total_readings: totalReadings
+      statistics: stats,
+      filters: {
+        device_id: device_id || null,
+        hours: hours || null
+      }
     });
     
   } catch (err) {
     console.error("GET /api/device/stats error:", err);
+    res.status(500).json({ 
+      success: false,
+      error: err.message || "Server error" 
+    });
+  }
+});
+
+// DELETE - Delete old readings (optional cleanup)
+router.delete('/cleanup', async (req, res) => {
+  try {
+    await connectDB();
+    
+    const { older_than_days = 30, device_id } = req.query;
+    
+    const query = {
+      created_at: { 
+        $lt: new Date(Date.now() - parseInt(older_than_days) * 24 * 60 * 60 * 1000)
+      }
+    };
+    
+    if (device_id) query.device_id = device_id;
+    
+    const result = await Device.deleteMany(query);
+    
+    res.status(200).json({
+      success: true,
+      message: `Cleaned up ${result.deletedCount} old readings`,
+      deleted_count: result.deletedCount
+    });
+    
+  } catch (err) {
+    console.error("DELETE /api/device/cleanup error:", err);
     res.status(500).json({ 
       success: false,
       error: err.message || "Server error" 
